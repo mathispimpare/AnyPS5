@@ -21,6 +21,7 @@ from test_macos_executable_exports import executable
 from test_macos_guest_weak_exports import module
 from test_macos_output import MachO
 
+LC_UUID = 0x1B
 LC_CODE_SIGNATURE = 0x1D
 CSMAGIC_EMBEDDED_SIGNATURE = 0xFADE0CC0
 CSMAGIC_CODEDIRECTORY = 0xFADE0C02
@@ -41,6 +42,13 @@ def commands(data):
         cmd, size = struct.unpack_from('<II', data, offset)
         yield cmd, offset
         offset += size
+
+
+def build_uuid(data):
+    [offset] = [offset for cmd, offset in commands(data) if cmd == LC_UUID]
+    size, uuid = struct.unpack_from('<I16s', data, offset + 4)
+    assert size == 24, size
+    return uuid
 
 
 def check_signature(name, data, identifier, main_binary):
@@ -167,14 +175,30 @@ def main():
         (case / 'sce_module').mkdir(parents=True)
         (case / 'sce_module' / 'sample.prx').write_bytes(module(1))
         (case / 'input.elf').write_bytes(main_fixture())
-        run = subprocess.run([str(relinker), '--macos', str(case / 'input.elf'), str(case / 'title')], capture_output=True, text=True, timeout=60)
-        assert run.returncode == 0, (run.stdout, run.stderr)
+        title = case / 'title'
         converted = case / 'app0/sce_module/sample.prx.guest.prx'
-        check_signature('module', converted.read_bytes(), 'sample.prx.guest.prx', False)
-        check_signature('title', (case / 'title').read_bytes(), 'title', True)
+
+        def convert(library_dir):
+            run = subprocess.run([str(relinker), '--macos', '--rpath', '$ORIGIN/' + library_dir,
+                                  str(case / 'input.elf'), str(title)], capture_output=True, text=True, timeout=60)
+            assert run.returncode == 0, (run.stdout, run.stderr)
+            images = {}
+            for path, origin in ((title, '@executable_path'), (converted, '@loader_path/../..')):
+                data = path.read_bytes()
+                assert MachO(data).rpaths == [f'{origin}/{library_dir}'], path.name
+                check_signature(path.name, data, path.name, path == title)
+                images[path.name] = data
+            return images
+
+        original = convert('libs')
+        changed = convert('mods')
+        assert convert('libs') == original, 'Repeated conversion changed the signed output'
+        for name, data in original.items():
+            uuid = build_uuid(data)
+            assert build_uuid(changed[name]) != uuid, f'{name}: different LC_RPATHs share LC_UUID {uuid.hex()}'
 
         if sys.platform == 'darwin' and platform.machine() in ('arm64', 'x86_64'):
-            for path in (output, converted, case / 'title'):
+            for path in (output, converted, title):
                 check_codesign(path)
             run_native(work, output, converted)
             check_resign(work, output)

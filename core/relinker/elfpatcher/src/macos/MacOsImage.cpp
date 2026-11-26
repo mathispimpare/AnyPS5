@@ -1159,12 +1159,6 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
     Io::WriteU32(commands, codeSignatureCommand + 8, static_cast<std::uint32_t>(codeSignatureOffset));
     Io::WriteU32(commands, codeSignatureCommand + 12, static_cast<std::uint32_t>(codeSignatureSize));
 
-    std::uint64_t hash = 0xcbf29ce484222325ull;
-    for (const auto byte : file) hash = (hash ^ byte) * 0x100000001b3ull;
-    Io::WriteU64(commands, uuidCommand + 8, hash);
-    Io::WriteU64(commands, uuidCommand + 16, hash * 0x9e3779b97f4a7c15ull);
-    commands[uuidCommand + 14] = static_cast<std::uint8_t>((commands[uuidCommand + 14] & 0x0f) | 0x40);
-
     Io::WriteU32(file, 0, MhMagic64);
     Io::WriteU32(file, 4, CpuTypeX8664);
     Io::WriteU32(file, 8, CpuSubtypeX8664All);
@@ -1174,6 +1168,11 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
     const bool weakDefinitions = std::any_of(input.Exports.begin(), input.Exports.end(), [](const auto& entry) { return (entry.Flags & ExportWeakDefinition) != 0; });
     Io::WriteU32(file, 24, MhNoUndefs | MhDyldLink | MhTwoLevel | (weakDefinitions ? MhWeakDefines : 0));
     std::copy(commands.begin(), commands.end(), file.begin() + HeaderSize);
+    const auto digest = Sha256(file.data(), file.size());
+    const auto uuid = file.begin() + HeaderSize + uuidCommand + 8;
+    std::copy_n(digest.begin(), 16, uuid);
+    uuid[6] = (uuid[6] & 0x0f) | 0x80;
+    uuid[8] = (uuid[8] & 0x3f) | 0x80;
     AppendCodeSignature(file, input.Identifier, 0, LoadRva, input.Executable);
     if (file.size() != codeSignatureOffset + codeSignatureSize) throw Domain::RelinkerException("Mach-O code signature does not fill its __LINKEDIT space");
     return file;
